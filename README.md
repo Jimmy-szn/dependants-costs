@@ -50,17 +50,27 @@ pytest -q                 # the contract test
 docker build -t dependant-costs . && docker run -p 8000:8000 dependant-costs
 ```
 
-## The order of work
+## Progress
 
-1. **Baseline.** The dumbest thing that works, returned from `app/service.py`. Measure it and
-   **write the number down.** You are not allowed to build a model before this exists.
-2. **Evaluation.** Pick your metric. Split your data **by time**, not at random, and hold the
-   last part back.
-3. **Model.** Build the real thing. Show it beats the baseline.
-4. **Integration.** Keep the contract identical while the inside changes completely. Deploy it,
-   send Benjamin the URL.
+| Step | Status | Notes |
+|------|--------|-------|
+| **1 — Baseline** |  In progress | FastAPI scaffold is up; `service.py` still returns a stub — actual baseline computation not yet written |
+| **2 — Evaluation** |  In progress | EDA started in `notebooks/aml.ipynb` and `notebooks/khbs2015_2016.ipynb`; metric and time-based split not yet finalised |
+| **3 — Model** |  Not started | Waiting on baseline number |
+| **4 — Integration & deploy** |  Not started | Waiting on model |
 
-## What you hand in
+### What exists right now
+
+- `app/main.py` — FastAPI app wired to `POST /projection` + `/health`
+- `app/schemas.py` — Pydantic `Request`/`Response` contract shapes (fields still marked TODO)
+- `app/service.py` — stub handler; **returns zeros** — baseline logic is next
+- `data/aml.csv` — 836 rows of M-Pesa transaction data (date, category, amount\_in, amount\_out, balance)
+- `notebooks/aml.ipynb` — exploratory analysis of the AML transaction data
+- `notebooks/khbs2015_2016.ipynb` — exploratory analysis of KHBS 2015/16 household budget data
+- `demo/index.html` — minimal front-end for manual testing
+- `Dockerfile` + `.env.example` — deployment scaffold
+
+### What you hand in
 
 - This repo, on GitHub, with Benjamin added as a collaborator
 - A live URL that answers
