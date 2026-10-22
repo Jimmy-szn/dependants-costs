@@ -1,5 +1,4 @@
 from datetime import datetime
-
 from fastapi import FastAPI, Depends, HTTPException, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.middleware.cors import CORSMiddleware
@@ -15,6 +14,12 @@ import torch.nn as nn
 from pydantic import BaseModel
 from typing import List
 
+import os
+import torch
+import torch.nn as nn
+import joblib
+import pandas as pd
+from sklearn.metrics import pairwise_distances_argmin_min
 # Import schema boundaries securely
 from app.schemas import Request, Response
 from app.service import handle
@@ -37,11 +42,41 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-import os
-import torch
-import torch.nn as nn
-import joblib
+class BirchAutoencoder(nn.Module):
+    def __init__(self, in_d, hidden_d=16, latent_d=4):
+        super().__init__()
+        self.encoder = nn.Sequential(
+            nn.Linear(in_d, hidden_d),
+            nn.BatchNorm1d(hidden_d),
+            nn.ReLU(),
+            nn.Linear(hidden_d, latent_d)
+        )
+        self.decoder = nn.Sequential(
+            nn.Linear(latent_d, hidden_d),
+            nn.BatchNorm1d(hidden_d),
+            nn.ReLU(),
+            nn.Linear(hidden_d, in_d)
+        )
 
+    def forward(self, x):
+        return self.decoder(self.encoder(x))
+
+BAE_MODEL_PATH = os.path.join(BASE_DIR, "../models/bae.pth")
+BAE_BUNDLE_PATH = os.path.join(BASE_DIR, "../models/bae_bundle.joblib")
+
+bae_model = None
+bae_bundle = None
+
+if os.path.exists(BAE_BUNDLE_PATH) and os.path.exists(BAE_MODEL_PATH):
+    bae_bundle = joblib.load(BAE_BUNDLE_PATH)
+    in_features = len(bae_bundle["feature_columns"])
+    
+    bae_model = BirchAutoencoder(in_d=in_features, hidden_d=16, latent_d=4)
+    bae_model.load_state_dict(torch.load(BAE_MODEL_PATH, map_location=torch.device('cpu')))
+    bae_model.eval()
+    print(f" BAE (Birch Autoencoder) loaded successfully. (Threshold: {bae_bundle['threshold']:.4f})")
+else:
+    print(" BAE model or bundle files not found in /models.")
 class BudgetMLP(nn.Module):
     def __init__(self, input_size):
         super().__init__()
@@ -75,6 +110,19 @@ class SyncRequest(BaseModel):
     transactionData: List[dict]
 class ForecastRequest(BaseModel):
     student_id: str
+class AnomalyDetectionRequest(BaseModel):
+    transaction_id: str = None 
+    student_id: str
+    amount: float
+    sender_balance_before: float
+    sender_balance_after: float
+    receiver_balance_before: float = 0.0
+    receiver_balance_after: float = 0.0
+    hour: int = 12
+    transaction_type: str = "peer"    # peer, till, paybill
+    device_type: str = "smartphone"   # smartphone, feature
+    region: str = "Nairobi"           # Nairobi, Eldoret, Kisumu, Nakuru, etc.
+    day_of_week: str = "Mon"
 async def get_current_user_id(credentials: HTTPAuthorizationCredentials = Depends(security)):
     token = credentials.credentials
     
@@ -148,9 +196,25 @@ def endpoint(body: Request) -> Response:
 async def sync_transaction(request: SyncRequest):
     try:
         response = supabase_db.table("transactions").insert(request.transactionData).execute()
-        return {"status": "ok", "data": response.data}
+        inserted_transactions = response.data if response.data else []
+        evaluation_results = []
+        for tx in inserted_transactions:
+            t_id = tx.get("transaction_id") or tx.get("trans_id") or tx.get("id")
+            ai_eval = score_transaction_with_bae(tx, trans_id=t_id)
+            if ai_eval:
+                evaluation_results.append(ai_eval)
+
+        high_risk_count = sum(1 for res in evaluation_results if res.get("risk_flag"))
+
+        return {
+            "status": "ok",
+            "synced_count": len(inserted_transactions),
+            "anomalies_flagged": high_risk_count,
+            "evaluations": evaluation_results,
+            "data": inserted_transactions
+        }
     except Exception as e:
-        print(f"Database Exception Encountered: {str(e)}")
+        print(f"Database/Sync Exception Encountered: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,           
             detail=str(e),
@@ -221,4 +285,73 @@ async def predict_budget(request: ForecastRequest):
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Prediction error: {str(e)}",
         ) 
+    
+def score_transaction_with_bae(tx_data: dict, trans_id: str = None):
+    """Evaluates a single transaction dictionary with BAE and saves to ai_results."""
+    if bae_model is None or bae_bundle is None:
+        return None
 
+    try:
+        # Default fallbacks if fields are missing
+        raw_amount = abs(float(tx_data.get("amount_out") or tx_data.get("amount") or 0.0))
+        hour = datetime.now().hour
+        day_of_week = datetime.now().strftime("%a")
+
+        input_df = pd.DataFrame([{
+            'amount': raw_amount,
+            'sender_balance_before': float(tx_data.get("balance", 0.0) + raw_amount),
+            'sender_balance_after': float(tx_data.get("balance", 0.0)),
+            'receiver_balance_before': 0.0,
+            'receiver_balance_after': 0.0,
+            'hour': hour,
+            'transaction_type': tx_data.get("category", "peer"),
+            'device_type': 'smartphone',
+            'region': 'Nairobi',
+            'day_of_week': day_of_week
+        }])
+
+        cat_cols = ['transaction_type', 'device_type', 'region', 'day_of_week']
+        encoded = pd.get_dummies(input_df, columns=cat_cols, drop_first=True, dtype=float)
+        aligned = encoded.reindex(columns=bae_bundle["feature_columns"], fill_value=0.0)
+
+        scaled_x = bae_bundle["feature_scaler"].transform(aligned).astype(np.float32)
+
+        with torch.no_grad():
+            tensor_x = torch.tensor(scaled_x, dtype=torch.float32)
+            latent = bae_model.encoder(tensor_x).numpy()
+            reconstructed = bae_model(tensor_x).numpy()
+
+        recon_error = float(np.mean((scaled_x - reconstructed) ** 2, axis=1)[0])
+
+        latent_scaled = bae_bundle["latent_scaler"].transform(latent)
+        _, cluster_dist = pairwise_distances_argmin_min(latent_scaled, bae_bundle["birch_centers"])
+        cluster_dist_val = float(cluster_dist[0])
+
+        stats = bae_bundle["stats"]
+        recon_score = (recon_error - stats["recon_median"]) / stats["recon_iqr"]
+        cluster_score = (cluster_dist_val - stats["cluster_median"]) / stats["cluster_iqr"]
+        anomaly_score = float((recon_score + cluster_score) / 2)
+
+        threshold = float(bae_bundle["threshold"])
+        is_anomaly = anomaly_score >= threshold
+
+        # Insert to public.ai_results table
+        result_record = {
+            "results_id": str(uuid.uuid4()),
+            "transaction_id": trans_id,
+            "track_a_score": None,
+            "track_a_forecast": None,
+            "track_b_reconstruct_err": round(recon_error, 4),
+            "track_b_forecast": None,
+            "risk_flag": is_anomaly
+        }
+        supabase_db.table("ai_results").insert(result_record).execute()
+
+        return {
+            "results_id": result_record["results_id"],
+            "anomaly_score": round(anomaly_score, 4),
+            "risk_flag": is_anomaly
+        }
+    except Exception as e:
+        print(f"BAE evaluation error for transaction: {str(e)}")
+        return None
