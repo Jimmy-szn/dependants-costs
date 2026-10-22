@@ -1,0 +1,12 @@
+.venv
+venv
+.env
+.git
+.gitignore
+__pycache__
+*.pyc
+.pytest_cache
+data/
+notebooks/
+*.pdf
+*.ipynb
