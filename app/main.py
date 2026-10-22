@@ -23,7 +23,7 @@ from sklearn.metrics import pairwise_distances_argmin_min
 # Import schema boundaries securely
 from app.schemas import Request, Response
 from app.service import handle
-
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 load_dotenv()
 SUPABASE_URL = os.getenv("SUPABASE_URL")
