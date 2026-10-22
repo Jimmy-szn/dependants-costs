@@ -1,3 +1,5 @@
+from datetime import datetime
+
 from fastapi import FastAPI, Depends, HTTPException, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.middleware.cors import CORSMiddleware
@@ -16,6 +18,7 @@ from typing import List
 # Import schema boundaries securely
 from app.schemas import Request, Response
 from app.service import handle
+
 
 load_dotenv()
 SUPABASE_URL = os.getenv("SUPABASE_URL")
@@ -68,10 +71,10 @@ else:
     print("Scaler files not detected yet. Check your Desktop Sync status.")
 
 
-
+class SyncRequest(BaseModel):
+    transactionData: List[dict]
 class ForecastRequest(BaseModel):
-    feature: List[float]
-
+    student_id: str
 async def get_current_user_id(credentials: HTTPAuthorizationCredentials = Depends(security)):
     token = credentials.credentials
     
@@ -102,7 +105,19 @@ def health():
 async def budget(student_id: str = Depends(get_current_user_id)):
     response = supabase_db.table("budget_caps").select("*").eq("student_id", student_id).execute()
     return {"status": "ok", "data": response.data}
-
+@app.get('/fetch-monthly-transactions')
+async def fetch_monthly_transactions(student_id: str = Depends(get_current_user_id)):
+    try:
+        now = datetime.now()
+        start_of_month = datetime(now.year, now.month, 1).isoformat()
+        response = supabase_db.table("transactions").select("*").eq("student_id", student_id).gte("created_at", start_of_month).order("created_at", desc=True).execute()
+        transactions_response = response.data if response.data else []
+        return {"status": "success", "transactions": transactions_response}
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error fetching transactions: {str(e)}",
+        )
 @app.post('/create-budget')
 async def create_budget(item: dict, student_id: str = Depends(get_current_user_id)):
     sanitized_item = {
@@ -129,15 +144,66 @@ async def create_budget(item: dict, student_id: str = Depends(get_current_user_i
 def endpoint(body: Request) -> Response:
     return handle(body)
 
+@app.post("/sync-transaction")
+async def sync_transaction(request: SyncRequest):
+    try:
+        response = supabase_db.table("transactions").insert(request.transactionData).execute()
+        return {"status": "ok", "data": response.data}
+    except Exception as e:
+        print(f"Database Exception Encountered: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,           
+            detail=str(e),
+        )
+
+
 @app.post("/predict-budget")
 async def predict_budget(request: ForecastRequest):
-    if len(request.feature) != 10:
-      raise HTTPException(
-        status_code=status.HTTP_400_BAD_REQUEST,
-        detail="Invalid number of features. Expected 10."
-      )
+   
     try:
-        raw_features = np.array([request.feature])
+        now = datetime.now()
+        start_of_month = datetime(now.year, now.month, 1).isoformat()
+        response = supabase_db.table("transactions").select("category, amount_out").eq("student_id", request.student_id).gte("created_at", start_of_month).execute()
+        transactions_response = response.data if response.data else []
+        caregory_sums = {
+            "agent_withdrawal":0.0,
+            "airtime": 0.0,
+            "buy_goods": 0.0,
+            "data_bundle": 0.0,
+            "mshwari_deposit": 0.0,
+            "pochi": 0.0,
+            "paybill": 0.0,
+            "send_money": 0.0,
+            "transaction_fee": 0.0
+        }
+        gross_outflow = 0.0
+        for transaction in transactions_response:
+            category = str(transaction.get("category", "uncategorized")).strip().lower()
+            raw_amount = transaction.get("amount_out")
+            if raw_amount is None:
+                amount_out = 0.0
+            else:
+                try:
+                    amount_out = float(raw_amount)
+                except ValueError:
+                    amount_out = 0.0
+
+            if category in caregory_sums:
+                caregory_sums[category] += amount_out
+                gross_outflow += amount_out
+        generated_features = [
+            caregory_sums["agent_withdrawal"], 
+            caregory_sums["airtime"],
+            caregory_sums["buy_goods"],
+            caregory_sums["data_bundle"],
+            caregory_sums["mshwari_deposit"],
+            caregory_sums["pochi"],
+            caregory_sums["paybill"],
+            caregory_sums["send_money"],
+            caregory_sums["transaction_fee"],
+            gross_outflow
+        ]
+        raw_features = np.array([generated_features], dtype=np.float32)
         if 'x_scaler' in globals():
             scaled_features = x_scaler.transform(raw_features)
         else:
@@ -149,12 +215,10 @@ async def predict_budget(request: ForecastRequest):
             forecasted_value = y_scaler.inverse_transform([[prediction]])[0][0]
         else:
             forecasted_value = prediction
-
-        return {"status": "success", "forecasted_amount": round(forecasted_value, 2)}
+        return {"status": "success", "forecasted_amount": round(forecasted_value, 2), "transactions_analyzed":len(transactions_response), "category_sums": caregory_sums, "gross_outflow": gross_outflow}
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Prediction error: {str(e)}",
         ) 
-            
 
