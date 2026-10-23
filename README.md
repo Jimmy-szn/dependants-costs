@@ -51,24 +51,46 @@ docker build -t dependant-costs . && docker run -p 8000:8000 dependant-costs
 ```
 
 ## Progress
+## Implemented API Endpoints
 
-| Step | Status | Notes |
-|------|--------|-------|
-| **1 — Baseline** |  In progress | FastAPI scaffold is up; `service.py` still returns a stub — actual baseline computation not yet written |
-| **2 — Evaluation** |  In progress | EDA started in `notebooks/aml.ipynb` and `notebooks/khbs2015_2016.ipynb`; metric and time-based split not yet finalised |
-| **3 — Model** |  Not started | Waiting on baseline number |
-| **4 — Integration & deploy** |  Not started | Waiting on model |
+| Method | Endpoint | Description | Model Engine |
+| :--- | :--- | :--- | :--- |
+| `POST` | `/projection` | Dependant 1/5/10-year projection contract | Demographic Baseline |
+| `POST` | `/predict-budget` | 30-day student expenditure forecast | **Deep Multi-Layer Perceptron (MLP)** |
+| `POST` | `/detect-anomaly` | Evaluates single transaction for fraud/velocity spikes | **Birch Autoencoder (BAE)** |
+| `POST` | `/sync-transaction` | Syncs mobile transactions & logs to `ai_results` | Automated BAE Screening |
+| `POST` | `/create-budget` | Sets category budget caps in Supabase | Supabase Auth Protected |
+| `GET`  | `/view-budgets` | Retrieves user budget caps | Supabase Auth Protected |
+| `GET`  | `/fetch-monthly-transactions` | Fetches active month transactions | Supabase Auth Protected |
+| `GET`  | `/health` | Cloud health check endpoint | Core System |
+
+---
+
+## Progress & Benchmark Summary
+
+| Step | Status | Evidence & Metrics |
+|------|:------:|-------------------|
+| **1 — Baseline** | **Complete** | Historical Budget Baseline MAE: **16,510.73 KES**; PCA Anomaly F1: **0.0610** |
+| **2 — Evaluation** |  **Complete** | Chronological 70/15/15 train/val/test splits on 120,000 M-Pesa transaction records; Precision-Recall threshold tuning |
+| **3 — Model Training** |  **Complete** | **Deep MLP** beat all tree ensembles (MAE: **16,004.86 KES**); **Birch Autoencoder (BAE)** achieved **0.1548 F1** and **11.55% precision** (>3x gain over PCA) |
+| **4 — Integration & Deploy** |  **Complete** | Containerized with Docker and deployed live on **Render** with PostgreSQL persistence on **Supabase** |
+
+---
 
 ### What exists right now
 
-- `app/main.py` — FastAPI app wired to `POST /projection` + `/health`
-- `app/schemas.py` — Pydantic `Request`/`Response` contract shapes (fields still marked TODO)
-- `app/service.py` — stub handler; **returns zeros** — baseline logic is next
-- `data/aml.csv` — 836 rows of M-Pesa transaction data (date, category, amount\_in, amount\_out, balance)
-- `notebooks/aml.ipynb` — exploratory analysis of the AML transaction data
-- `notebooks/khbs2015_2016.ipynb` — exploratory analysis of KHBS 2015/16 household budget data
-- `demo/index.html` — minimal front-end for manual testing
-- `Dockerfile` + `.env.example` — deployment scaffold
+- **`app/main.py`** — Production FastAPI application with endpoints for budgeting, BAE anomaly detection, and Supabase database logging.
+- **`models/`** — Serialized production model weights:
+  - `mlp.pth` & scalers (`mlp_x_scaler.joblib`, `mlp_y_scaler.joblib`) — Budget forecasting.
+  - `bae.pth` & `bae_bundle.joblib` — Birch Autoencoder weights, 29 cluster centers, scalers, and decision threshold (0.8831).
+- **`tests/`** — Dedicated verification scripts:
+  - `review_mlp.py` — Verifies MLP weights and scalers loading.
+  - `review_bae.py` — End-to-end verification of Birch Autoencoder anomaly scoring.
+- **`notebooks/`**:
+  - `notebooks/mpesa-anomaly.ipynb` — 120,000 M-Pesa transaction evaluation for PCA vs. BAE.
+  - `notebooks/aml.ipynb` — Tree ensemble (Random Forest, XGBoost) and MLP expenditure experiments.
+  - `notebooks/Finaccess.ipynb` & `notebooks/khbs2015_2016.ipynb` — National household expenditure baselines.
+- **`Dockerfile` & `.dockerignore`** — Production deployment configuration configured for Render.
 
 ### What you hand in
 
