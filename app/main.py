@@ -148,7 +148,32 @@ def root():
 def health():
     """Hosting platforms call this to check the service is alive."""
     return {"status": "ok"}
+@app.get("/fetch-user-role")
+def fetch_user_role(user_id: str = Depends(get_current_user_id)):
+    student = (
+        supabase_db.table("students")
+        .select("student_id")
+        .eq("student_id", user_id)
+        .limit(1)
+        .execute()
+    )
+    if student.data:
+        return {"status": "ok", "role": "student"}
 
+    sponsor = (
+        supabase_db.table("sponsors")
+        .select("sponsor_id")
+        .eq("sponsor_id", user_id)
+        .limit(1)
+        .execute()
+    )
+    if sponsor.data:
+        return {"status": "ok", "role": "sponsor"}
+
+    raise HTTPException(
+        status_code=status.HTTP_404_NOT_FOUND,
+        detail="User role not found",
+    )
 @app.get("/view-budgets")
 async def budget(student_id: str = Depends(get_current_user_id)):
     response = supabase_db.table("budget_caps").select("*").eq("student_id", student_id).execute()
