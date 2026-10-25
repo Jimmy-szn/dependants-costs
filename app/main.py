@@ -362,7 +362,7 @@ def get_my_sponsor(student_id: str = Depends(require_student)):
 
     sponsor_ids = [l["sponsor_id"] for l in links.data]
     sponsors = (
-        supabase_db.table("sponsors").select("sponsor_id, full_name, email").in_("sponsor_id", sponsor_ids).execute()
+        supabase_db.table("sponsors").select("sponsor_id, fullname, email").in_("sponsor_id", sponsor_ids).execute()
     )
     by_id = {s["sponsor_id"]: s for s in sponsors.data}
 
@@ -383,7 +383,7 @@ def list_dependants(sponsor_id: str = Depends(require_sponsor)):
     if links.data:
         student_ids = [l["student_id"] for l in links.data]
         students = (
-            supabase_db.table("students").select("student_id, full_name, email").in_("student_id", student_ids).execute()
+            supabase_db.table("students").select("student_id, fullname, email").in_("student_id", student_ids).execute()
         )
         by_id = {s["student_id"]: s for s in students.data}
         dependants = [{**l, "student": by_id.get(l["student_id"])} for l in links.data]
