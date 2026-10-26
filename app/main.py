@@ -6,6 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse
 from supabase import create_client, Client
 import os
+import re
 import numpy as np
 import uuid
 from dotenv import load_dotenv
@@ -189,6 +190,8 @@ def now_utc() -> datetime:
 def month_start_utc() -> datetime:
     local =datetime.now(NAIROBI)
     return local.replace(day=1, hour=0, minute=0, second=0, microsecond=0).astimezone(timezone.utc)
+def norm_cat(s) -> str:
+    return re.sub(r"[^a-z0-9]+", "_", (s or "uncategorized").lower()).strip("_")
 
 def compute_budget_health(student_id: str) -> dict:
     since = month_start_utc()
@@ -212,7 +215,7 @@ def compute_budget_health(student_id: str) -> dict:
         out = float(t["amount_out"] or 0)
         total_in += float(t["amount_in"] or 0)
         total_out += out
-        cat = (t["category"] or "uncategorized").strip().lower()
+        cat = norm_cat(t.get("budget_category") or t.get("category"))
         spend_by_category[cat] = spend_by_category.get(cat, 0.0) + out
         if latest_balance is None and t["balance"] is not None:
             latest_balance = float(t["balance"])
@@ -222,7 +225,7 @@ def compute_budget_health(student_id: str) -> dict:
     categories, over, warn = [], 0, 0
     for c in caps:
         limit_amount = float(c["limit_amount"] or 0)
-        spent = spend_by_category.get((c["category"] or "").strip().lower(), 0.0)
+        spent = spend_by_category.get(norm_cat(c["category"]), 0.0)
         ratio = spent / limit_amount if limit_amount > 0 else 0.0
         state = "over" if ratio > 1 else "warning" if ratio >= WARN_AT else "ok"
         over += state == "over"
@@ -234,7 +237,7 @@ def compute_budget_health(student_id: str) -> dict:
             "percent_used": round(ratio * 100, 1),
             "state": state,
         })
-
+    matched = sum(c["spent"] for c in categories)
     return {
         "period_start": since,
         "overall": "over" if over else "warning" if (warn or flagged) else "ok",
@@ -243,6 +246,7 @@ def compute_budget_health(student_id: str) -> dict:
         "latest_balance": latest_balance,
         "flagged_transactions": flagged,
         "categories": categories,
+        "matched": round(matched, 2),
     }
 
 
