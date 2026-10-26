@@ -658,3 +658,21 @@ def dependant_budget_health(student_id: str,
                             sponsor_id: str = Depends(require_sponsor)):
     assert_can_view_student(sponsor_id, student_id)
     return {"status": "ok", "student_id": student_id, **compute_budget_health(student_id)}
+
+class TagBody(BaseModel):
+    budget_category: str | None = None
+
+@app.patch("/student/transactions/{transaction_id}/budget-category")
+def tag_transaction(transaction_id: str, body: TagBody,
+                    student_id: str = Depends(require_student)):
+    value = (body.budget_category or "").strip() or None
+    res = (
+        supabase_db.table("transactions")
+        .update({"budget_category": value})
+        .eq("transaction_id", transaction_id)
+        .eq("student_id", student_id)   # a student can only tag their own rows
+        .execute()
+    )
+    if not res.data:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Transaction not found")
+    return {"status": "ok", "data": res.data[0]}
