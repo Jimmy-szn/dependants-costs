@@ -197,7 +197,7 @@ def compute_budget_health(student_id: str) -> dict:
     since = month_start_utc()
     transactions = (
         supabase_db.table("transactions")
-        .select("amount_in, amount_out, category, balance, created_at, ""ai_results(risk_flag)")
+        .select("amount_in, amount_out, category, balance,budget_category, created_at, ""ai_results(risk_flag)")
         .eq("student_id", student_id)
         .gte("created_at", since.isoformat())
         .order("created_at", desc=True)
