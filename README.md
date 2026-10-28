@@ -67,14 +67,43 @@ docker build -t dependant-costs . && docker run -p 8000:8000 dependant-costs
 ---
 
 ## Progress & Benchmark Summary
+### Table 1 — Anomaly detection, Kaggle M-Pesa fraud data (test: months 11–12, 575 fraud cases in 19,847 rows)
 
-| Step | Status | Evidence & Metrics |
-|------|:------:|-------------------|
-| **1 — Baseline** | **Complete** | Historical Budget Baseline MAE: **16,510.73 KES**; PCA Anomaly F1: **0.0610** |
-| **2 — Evaluation** |  **Complete** | Chronological 70/15/15 train/val/test splits on 120,000 M-Pesa transaction records; Precision-Recall threshold tuning |
-| **3 — Model Training** |  **Complete** | **Deep MLP** beat all tree ensembles (MAE: **16,004.86 KES**); **Birch Autoencoder (BAE)** achieved **0.1548 F1** and **11.55% precision** (>3x gain over PCA) |
-| **4 — Integration & Deploy** |  **Complete** | Containerized with Docker and deployed live on **Render** with PostgreSQL persistence on **Supabase** |
+| Method | Precision | Recall | F1 | Alerts / caught | Test PR-AUC |
+|---|:---:|:---:|:---:|:---:|:---:|
+| Overdraw rule (amount > sender balance) | 1.000 | 0.612 | 0.759 | 352 / 352 | n/a |
+| PCA (95% variance, 18 components) | 0.987 | 0.661 | 0.792 | 385 / 380 | 0.7003 |
+| BAE (BIRCH autoencoder) | 0.929 | 0.664 | 0.775 | 411 / 382 | 0.6998 |
+| Supervised gradient boosting (diagnostic only) | n/a | n/a | n/a | n/a | 0.697 |
 
+### Table 2 — Effect of preprocessing on the Kaggle data (F1)
+
+| Model | Raw features, 70/15/15 split | Log-transformed features, month-based split |
+|---|:---:|:---:|
+| PCA | 0.0610 | 0.7917 |
+| BAE | 0.1548 | 0.7748 |
+
+### Table 3 — Anomaly detection, synthetic transactions (test: 94 injected anomalies in 1,876 rows)
+
+| Model | Precision | Recall | F1 | Alerts / caught | Test PR-AUC |
+|---|:---:|:---:|:---:|:---:|:---:|
+| PCA (90% variance, 11 components) | 0.382 | 0.447 | 0.412 | 110 / 42 | 0.393 |
+| BAE | 0.467 | 0.372 | 0.414 | 75 / 35 | 0.432 |
+
+Bootstrap 95% interval for the PR-AUC difference (BAE minus PCA): −0.051 to 0.129 (includes zero, so the models are comparable).
+
+### Table 4 — Budget forecasting, synthetic data (monthly-equivalent KES)
+
+| Model | Validation MAE | Validation RMSE | Test MAE | Test RMSE |
+|---|:---:|:---:|:---:|:---:|
+| Training-mean baseline | 32,476 | 49,612 | 31,777 | 33,699 |
+| Random Forest | 41,378 | 54,467 | 30,915* | 38,155* |
+| XGBoost | 49,295 | 64,635 | n/a | n/a |
+| RF + XGBoost ensemble | 45,259 | 58,125 | n/a | n/a |
+| MLP (seed 20260930) | 31,364 | 50,788 | 23,322 | 26,690 |
+| MLP (mean of 5 seeds) | 30,780 | n/a | 22,634 (SD 2,832) | 26,388 |
+
+\* Refit on train plus validation and compared with a baseline built from the same rows (test MAE 30,617, RMSE 32,573).
 ---
 
 ### What exists right now
