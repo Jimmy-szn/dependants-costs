@@ -17,7 +17,7 @@ class BudgetMLP(nn.Module):
 MODEL_PATH = "../models/mlp.pth" 
 X_SCALER_PATH = "../models/mlp_x_scaler.joblib"
 Y_SCALER_PATH = "../models/mlp_y_scaler.joblib"
-model = BudgetMLP(input_size=10) 
+model = BudgetMLP(input_size=12) 
 
 if os.path.exists(MODEL_PATH):
     model.load_state_dict(torch.load(MODEL_PATH, map_location=torch.device('cpu')))
