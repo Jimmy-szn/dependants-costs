@@ -91,7 +91,7 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 MODEL_PATH = os.path.join(BASE_DIR, "../models/mlp.pth")
 X_SCALER_PATH = os.path.join(BASE_DIR, "../models/mlp_x_scaler.joblib")
 Y_SCALER_PATH = os.path.join(BASE_DIR, "../models/mlp_y_scaler.joblib")
-model = BudgetMLP(input_size=10) 
+model = BudgetMLP(input_size=12) 
 
 if os.path.exists(MODEL_PATH):
     model.load_state_dict(torch.load(MODEL_PATH, map_location=torch.device('cpu')))
@@ -528,16 +528,18 @@ async def predict_budget(request: ForecastRequest,
         start_of_month = month_start_utc().isoformat()
         response = supabase_db.table("transactions").select("category, amount_out").eq("student_id", request.student_id).gte("created_at", start_of_month).execute()
         transactions_response = response.data if response.data else []
-        caregory_sums = {
+        category_sums = {
             "agent_withdrawal":0.0,
             "airtime": 0.0,
             "buy_goods": 0.0,
             "data_bundle": 0.0,
             "mshwari_deposit": 0.0,
             "pochi": 0.0,
-            "paybill": 0.0,
+            "pay_bill": 0.0,
             "send_money": 0.0,
-            "transaction_fee": 0.0
+            "transaction_fee": 0.0,
+            "other": 0.0,
+            "student_mean_so_far": 0.0
         }
         gross_outflow = 0.0
         for transaction in transactions_response:
@@ -551,20 +553,24 @@ async def predict_budget(request: ForecastRequest,
                 except ValueError:
                     amount_out = 0.0
 
-            if category in caregory_sums:
-                caregory_sums[category] += amount_out
+            if category in category_sums:
+                category_sums[category] += amount_out
                 gross_outflow += amount_out
+        student_mean_so_far = 0.0
+
         generated_features = [
-            caregory_sums["agent_withdrawal"], 
-            caregory_sums["airtime"],
-            caregory_sums["buy_goods"],
-            caregory_sums["data_bundle"],
-            caregory_sums["mshwari_deposit"],
-            caregory_sums["pochi"],
-            caregory_sums["paybill"],
-            caregory_sums["send_money"],
-            caregory_sums["transaction_fee"],
-            gross_outflow
+            category_sums["agent_withdrawal"], 
+            category_sums["airtime"],
+            category_sums["buy_goods"],
+            category_sums["data_bundle"],
+            category_sums["mshwari_deposit"],
+            category_sums["other"],               # index 5
+            category_sums["pay_bill"],            # index 6
+            category_sums["pochi"],               # index 7
+            category_sums["send_money"],          # index 8
+            category_sums["transaction_fee"],     # index 9
+            gross_outflow,                        # index 10 (gross_outflow_kes)
+            student_mean_so_far                   # index 11
         ]
         raw_features = np.array([generated_features], dtype=np.float32)
         if x_scaler is not None:
@@ -578,13 +584,26 @@ async def predict_budget(request: ForecastRequest,
             forecasted_value = y_scaler.inverse_transform([[prediction]])[0][0]
         else:
             forecasted_value = prediction
-        return {"status": "success", "forecasted_amount": round(forecasted_value, 2), "transactions_analyzed":len(transactions_response), "category_sums": caregory_sums, "gross_outflow": gross_outflow}
+        return {"status": "success", "forecasted_amount": round(forecasted_value, 2), "transactions_analyzed":len(transactions_response), "category_sums": category_sums, "gross_outflow_kes": gross_outflow}
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Prediction error: {str(e)}",
         ) 
-    
+def add_features(d):
+    d = d.copy()
+    d["sender_gap"] = d["sender_balance_before"] - d["amount"] - d["sender_balance_after"]
+    d["receiver_gap"] = d["receiver_balance_before"] + d["amount"] - d["receiver_balance_after"]
+    d["amount_ratio"] = d["amount"] / (d["sender_balance_before"] + 1)
+    d["drained"] = (d["sender_balance_after"] <= 0).astype(float)
+    d["hour_sin"] = np.sin(2 * np.pi * d["hour"] / 24)
+    d["hour_cos"] = np.cos(2 * np.pi * d["hour"] / 24)
+    for c in ["sender_gap", "receiver_gap"]:
+        d[c] = np.sign(d[c]) * np.log1p(d[c].abs())
+    for c in ["amount", "sender_balance_before", "sender_balance_after",
+              "receiver_balance_before", "receiver_balance_after"]:
+        d[c] = np.log1p(d[c].clip(lower=0))
+    return d
 def score_transaction_with_bae(tx_data: dict, trans_id: str = None):
     """Evaluates a single transaction dictionary with BAE and saves to ai_results."""
     if bae_model is None or bae_bundle is None:
@@ -608,10 +627,12 @@ def score_transaction_with_bae(tx_data: dict, trans_id: str = None):
             'region': 'Nairobi',
             'day_of_week': day_of_week
         }])
-
         cat_cols = ['transaction_type', 'device_type', 'region', 'day_of_week']
-        encoded = pd.get_dummies(input_df, columns=cat_cols, drop_first=True, dtype=float)
+        featured_df = add_features(input_df)
+        encoded = pd.get_dummies(featured_df, columns=cat_cols, drop_first=True, dtype=float)
         aligned = encoded.reindex(columns=bae_bundle["feature_columns"], fill_value=0.0)
+        # encoded = pd.get_dummies(input_df, columns=cat_cols, drop_first=True, dtype=float)
+        # aligned = encoded.reindex(columns=bae_bundle["feature_columns"], fill_value=0.0)
 
         scaled_x = bae_bundle["feature_scaler"].transform(aligned).astype(np.float32)
 
