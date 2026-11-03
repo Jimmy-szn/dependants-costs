@@ -1,4 +1,5 @@
 import os
+import pandas as pd
 import torch
 import torch.nn as nn
 import numpy as np
@@ -6,17 +7,15 @@ import joblib
 from sklearn.metrics import pairwise_distances_argmin_min
 
 class BirchAutoencoder(nn.Module):
-    def __init__(self, in_d, hidden_d=16, latent_d=4):
+    def __init__(self, in_d, hidden_d=32, latent_d=4):
         super().__init__()
         self.encoder = nn.Sequential(
             nn.Linear(in_d, hidden_d),
-            nn.BatchNorm1d(hidden_d),
             nn.ReLU(),
             nn.Linear(hidden_d, latent_d)
         )
         self.decoder = nn.Sequential(
             nn.Linear(latent_d, hidden_d),
-            nn.BatchNorm1d(hidden_d),
             nn.ReLU(),
             nn.Linear(hidden_d, in_d)
         )
@@ -39,7 +38,7 @@ else:
     feature_columns = bundle["feature_columns"]
     stats = bundle["stats"]
 
-    model = BirchAutoencoder(in_d=len(feature_columns), hidden_d=16, latent_d=4)
+    model = BirchAutoencoder(in_d=len(feature_columns), hidden_d=32, latent_d=4)
     model.load_state_dict(torch.load(MODEL_PATH, map_location=torch.device('cpu')))
     model.eval()
 
@@ -48,7 +47,7 @@ else:
     print(f"   - BIRCH clusters: {len(birch_centers)}")
     print(f"   - Anomaly threshold: {threshold:.4f}")
 
-    sample_raw = np.zeros((1, len(feature_columns)), dtype=np.float32)
+    sample_raw = pd.DataFrame(np.zeros((1, len(feature_columns)), dtype=np.float32), columns=feature_columns)
     sample_scaled = feature_scaler.transform(sample_raw)
 
     with torch.no_grad():

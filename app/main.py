@@ -45,17 +45,15 @@ app.add_middleware(
 )
 
 class BirchAutoencoder(nn.Module):
-    def __init__(self, in_d, hidden_d=16, latent_d=4):
+    def __init__(self, in_d, hidden_d=32, latent_d=4):
         super().__init__()
         self.encoder = nn.Sequential(
             nn.Linear(in_d, hidden_d),
-            nn.BatchNorm1d(hidden_d),
             nn.ReLU(),
             nn.Linear(hidden_d, latent_d)
         )
         self.decoder = nn.Sequential(
             nn.Linear(latent_d, hidden_d),
-            nn.BatchNorm1d(hidden_d),
             nn.ReLU(),
             nn.Linear(hidden_d, in_d)
         )
@@ -73,7 +71,7 @@ if os.path.exists(BAE_BUNDLE_PATH) and os.path.exists(BAE_MODEL_PATH):
     bae_bundle = joblib.load(BAE_BUNDLE_PATH)
     in_features = len(bae_bundle["feature_columns"])
     
-    bae_model = BirchAutoencoder(in_d=in_features, hidden_d=16, latent_d=4)
+    bae_model = BirchAutoencoder(in_d=in_features, hidden_d=32, latent_d=4)
     bae_model.load_state_dict(torch.load(BAE_MODEL_PATH, map_location=torch.device('cpu')))
     bae_model.eval()
     print(f" BAE (Birch Autoencoder) loaded successfully. (Threshold: {bae_bundle['threshold']:.4f})")
