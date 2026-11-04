@@ -557,19 +557,19 @@ async def predict_budget(request: ForecastRequest,
                 category_sums[category] += amount_out
                 gross_outflow += amount_out
         student_mean_so_far = 0.0
-
+        days_elapsed = max(1, datetime.now(NAIROBI).day)
         generated_features = [
-            category_sums["agent_withdrawal"], 
-            category_sums["airtime"],
-            category_sums["buy_goods"],
-            category_sums["data_bundle"],
-            category_sums["mshwari_deposit"],
-            category_sums["other"],               # index 5
-            category_sums["pay_bill"],            # index 6
-            category_sums["pochi"],               # index 7
-            category_sums["send_money"],          # index 8
-            category_sums["transaction_fee"],     # index 9
-            gross_outflow,                        # index 10 (gross_outflow_kes)
+            category_sums["agent_withdrawal"] / days_elapsed, 
+            category_sums["airtime"] / days_elapsed,
+            category_sums["buy_goods"] / days_elapsed,
+            category_sums["data_bundle"] / days_elapsed,
+            category_sums["mshwari_deposit"] / days_elapsed,
+            category_sums["other"] / days_elapsed,               # index 5
+            category_sums["pay_bill"] / days_elapsed,            # index 6
+            category_sums["pochi"] / days_elapsed,               # index 7
+            category_sums["send_money"] / days_elapsed,          # index 8
+            category_sums["transaction_fee"] / days_elapsed,     # index 9
+            gross_outflow /days_elapsed,                        # index 10 (gross_outflow_kes)
             student_mean_so_far                   # index 11
         ]
         raw_features = np.array([generated_features], dtype=np.float32)
@@ -581,10 +581,11 @@ async def predict_budget(request: ForecastRequest,
         with torch.no_grad():
             prediction = model(input_tensor).item()
         if y_scaler is not None:
-            forecasted_value = y_scaler.inverse_transform([[prediction]])[0][0]
+            daily_forecast = y_scaler.inverse_transform([[prediction]])[0][0]
         else:
-            forecasted_value = prediction
-        return {"status": "success", "forecasted_amount": round(forecasted_value, 2), "transactions_analyzed":len(transactions_response), "category_sums": category_sums, "gross_outflow_kes": gross_outflow}
+            daily_forecast= prediction
+        monthly_forecast = daily_forecast * 30
+        return {"status": "success", "forecasted_amount": round(monthly_forecast, 2), "transactions_analyzed":len(transactions_response), "category_sums": category_sums, "gross_outflow_kes": gross_outflow}
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
