@@ -63,9 +63,13 @@ class BirchAutoencoder(nn.Module):
 
 BAE_MODEL_PATH = os.path.join(BASE_DIR, "../models/bae.pth")
 BAE_BUNDLE_PATH = os.path.join(BASE_DIR, "../models/bae_bundle.joblib")
+PCA_BUNDLE_PATH = os.path.join(BASE_DIR, "../models/pca.joblib")
+
+
 
 bae_model = None
 bae_bundle = None
+pca_screener = None
 
 if os.path.exists(BAE_BUNDLE_PATH) and os.path.exists(BAE_MODEL_PATH):
     bae_bundle = joblib.load(BAE_BUNDLE_PATH)
@@ -75,6 +79,12 @@ if os.path.exists(BAE_BUNDLE_PATH) and os.path.exists(BAE_MODEL_PATH):
     bae_model.load_state_dict(torch.load(BAE_MODEL_PATH, map_location=torch.device('cpu')))
     bae_model.eval()
     print(f" BAE (Birch Autoencoder) loaded successfully. (Threshold: {bae_bundle['threshold']:.4f})")
+    if os.path.exists(PCA_BUNDLE_PATH):
+        pca_screener = joblib.load(PCA_BUNDLE_PATH)
+        exp_var = float(np.sum(pca_screener.explained_variance_ratio_)) if hasattr(pca_screener, "explained_variance_ratio_") else 0.0
+        print(f" PCA screener loaded successfully. (Explained variance: {exp_var:.4f})")
+    else:
+        print(" PCA screener file not found in /models.")
 else:
     print(" BAE model or bundle files not found in /models.")
 class BudgetMLP(nn.Module):
@@ -606,15 +616,26 @@ def add_features(d):
         d[c] = np.log1p(d[c].clip(lower=0))
     return d
 def score_transaction_with_bae(tx_data: dict, trans_id: str = None):
-    """Evaluates a single transaction dictionary with BAE and saves to ai_results."""
+    """Evaluates a two stage cascade with PCA edge screen and full BAE and saves to ai_results."""
     if bae_model is None or bae_bundle is None:
         return None
 
     try:
         raw_amount = abs(float(tx_data.get("amount_out") or tx_data.get("amount") or 0.0))
-        time_transaction = supabase_db.table("transactions").select("created_at").eq("transaction_id", trans_id).execute().data[0]["created_at"]
-        hour = datetime.fromisoformat(time_transaction).hour
-        day_of_week = datetime.fromisoformat(time_transaction).strftime("%a")
+        time_transaction = tx_data.get("created_at")
+        if not time_transaction and trans_id:
+            try:
+                db_rows = supabase_db.table("transactions").select("created_at").eq("transaction_id", trans_id).execute().data
+                if db_rows:
+                    time_transaction = db_rows[0].get("created_at")
+            except Exception:
+                pass
+        if not time_transaction:
+            time_transaction = datetime.now(timezone.utc).isoformat()
+
+        dt = datetime.fromisoformat(str(time_transaction).replace("Z", "+00:00"))
+        hour = dt.hour
+        day_of_week = dt.strftime("%a")
         balance = float(tx_data.get("balance") or 0.0)
         input_df = pd.DataFrame([{
             'amount': raw_amount,
@@ -632,8 +653,24 @@ def score_transaction_with_bae(tx_data: dict, trans_id: str = None):
         featured_df = add_features(input_df)
         encoded = pd.get_dummies(featured_df, columns=cat_cols, drop_first=True, dtype=float)
         aligned = encoded.reindex(columns=bae_bundle["feature_columns"], fill_value=0.0)
-        # encoded = pd.get_dummies(input_df, columns=cat_cols, drop_first=True, dtype=float)
-        # aligned = encoded.reindex(columns=bae_bundle["feature_columns"], fill_value=0.0)
+        if pca_screener is not None:
+        
+            scaled_for_pca = bae_bundle["feature_scaler"].transform(aligned).astype(np.float32)
+            spe = np.mean(
+                (scaled_for_pca - pca_screener.inverse_transform(
+                    pca_screener.transform(scaled_for_pca))
+                ) ** 2
+            )
+            pca_z = (
+                spe - bae_bundle["stats"]["pca_median"]
+            ) / max(bae_bundle["stats"]["pca_iqr"], 1e-12)
+            if pca_z < bae_bundle["stats"]["pca_threshold"]:
+                return {
+                    "results_id": None,
+                    "anomaly_score": float(pca_z),
+                    "risk_flag": False,
+                    "stage": "pca_cleared",
+                }
 
         scaled_x = bae_bundle["feature_scaler"].transform(aligned).astype(np.float32)
 
@@ -671,7 +708,8 @@ def score_transaction_with_bae(tx_data: dict, trans_id: str = None):
         return {
             "results_id": result_record["results_id"],
             "anomaly_score": round(anomaly_score, 4),
-            "risk_flag": is_anomaly
+            "risk_flag": is_anomaly,
+            "stage": "bae_full"
         }
     except Exception as e:
         print(f"BAE evaluation error for transaction: {str(e)}")
