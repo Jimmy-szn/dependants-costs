@@ -486,15 +486,36 @@ def endpoint(body: Request) -> Response:
 async def sync_transaction(request: SyncRequest, student_id: str = Depends(require_student)):
     if not request.transactionData:
         return {"status": "ok", "message": "synced_count: 0", "anomalies_flagged": 0, "evaluations": [], "data": []}
+    inference_fields = {"transaction_time", "occurred_at", "sender_balance_before"}
+    inference_metadata = {}
     for transaction in request.transactionData:
         transaction["student_id"] = student_id
+        transaction_id = transaction.get("transaction_id") or transaction.get("trans_id") or transaction.get("id")
+        if transaction_id:
+            inference_metadata[transaction_id] = {
+                key: transaction[key]
+                for key in inference_fields
+                if key in transaction
+            }
+    database_transactions = [
+        {
+            key: value
+            for key, value in transaction.items()
+            if key not in inference_fields
+        }
+        for transaction in request.transactionData
+    ]
     try:
-        response = supabase_db.table("transactions").upsert(request.transactionData, on_conflict="transaction_id", ignore_duplicates=True).execute()
+        response = supabase_db.table("transactions").upsert(database_transactions, on_conflict="transaction_id", ignore_duplicates=True).execute()
         inserted_transactions = response.data if response.data else []
         evaluation_results = []
         for tx in inserted_transactions:
             t_id = tx.get("transaction_id") or tx.get("trans_id") or tx.get("id")
-            ai_eval = score_transaction_with_bae(tx, trans_id=t_id)
+            scoring_transaction = {
+                **tx,
+                **inference_metadata.get(t_id, {}),
+            }
+            ai_eval = score_transaction_with_bae(scoring_transaction, trans_id=t_id)
             if ai_eval:
                 evaluation_results.append(ai_eval)
 
@@ -654,13 +675,26 @@ def score_transaction_with_bae(tx_data: dict, trans_id: str = None):
     if bae_model is None or bae_bundle is None:
         return None
 
-    raw_amount = tx_data.get("amount_out")
-    if raw_amount is None:
+    def is_positive_amount(value):
+        try:
+            return value is not None and float(value) > 0
+        except (TypeError, ValueError):
+            return False
+
+    amount_out = tx_data.get("amount_out")
+    amount_in = tx_data.get("amount_in")
+    if is_positive_amount(amount_out):
+        raw_amount = amount_out
+    elif is_positive_amount(amount_in):
+        raw_amount = amount_in
+    else:
         raw_amount = tx_data.get("amount")
     balance_after = tx_data.get("balance")
-    time_transaction = tx_data.get("created_at")
+    time_transaction = tx_data.get("transaction_time") or tx_data.get("occurred_at")
     if raw_amount is None or balance_after is None or not time_transaction:
-        return not_scored("Amount, closing balance, and transaction timestamp are required")
+        return not_scored(
+            "A non-zero transaction amount, closing balance, and transaction_time are required"
+        )
 
     try:
         amount = abs(float(raw_amount))
@@ -673,25 +707,14 @@ def score_transaction_with_bae(tx_data: dict, trans_id: str = None):
 
     if not np.isfinite([amount, sender_balance_after]).all():
         return not_scored("Amount and closing balance must be finite numbers")
+    if amount <= 0:
+        return not_scored("Transaction amount must be greater than zero")
 
     sender_balance_before = tx_data.get("sender_balance_before")
     if sender_balance_before is None:
-        student_id = tx_data.get("student_id")
-        if not student_id:
-            return not_scored("Student ID is required to find the previous balance")
-
-        previous_transactions = (
-            supabase_db.table("transactions")
-            .select("balance")
-            .eq("student_id", student_id)
-            .lt("created_at", str(time_transaction))
-            .order("created_at", desc=True)
-            .limit(1)
-            .execute()
-        ).data
-        if not previous_transactions or previous_transactions[0].get("balance") is None:
-            return not_scored("No earlier transaction balance is available")
-        sender_balance_before = previous_transactions[0]["balance"]
+        return not_scored(
+            "Opening balance is unavailable; send sender_balance_before with the transaction"
+        )
 
     try:
         sender_balance_before = float(sender_balance_before)
@@ -702,7 +725,7 @@ def score_transaction_with_bae(tx_data: dict, trans_id: str = None):
         return not_scored("Opening balance must be a finite number")
 
     if transaction_time.tzinfo is None:
-        transaction_time = transaction_time.replace(tzinfo=timezone.utc)
+        transaction_time = transaction_time.replace(tzinfo=NAIROBI)
     transaction_time = transaction_time.astimezone(NAIROBI)
 
     input_df = pd.DataFrame([{
