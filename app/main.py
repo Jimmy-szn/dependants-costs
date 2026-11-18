@@ -25,6 +25,7 @@ from sklearn.metrics import pairwise_distances_argmin_min
 # Import schema boundaries securely
 from app.schemas import Request, Response
 from app.service import handle
+from app.admin import router as admin_router
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 load_dotenv()
@@ -34,6 +35,7 @@ supabase_db : Client = create_client(SUPABASE_URL, os.getenv("SUPABASE_SERVICE_R
 
 
 app = FastAPI(title="U-CS 43 — dependant-costs", version="0.1.0")
+app.include_router(admin_router)
 security = HTTPBearer()
 
 app.add_middleware(
@@ -601,119 +603,193 @@ async def predict_budget(request: ForecastRequest,
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Prediction error: {str(e)}",
         ) 
-def add_features(d):
+def add_features(d: pd.DataFrame) -> pd.DataFrame:
     d = d.copy()
-    d["sender_gap"] = d["sender_balance_before"] - d["amount"] - d["sender_balance_after"]
-    d["receiver_gap"] = d["receiver_balance_before"] + d["amount"] - d["receiver_balance_after"]
+    d["sender_gap"] = (
+        d["sender_balance_before"]
+        - d["amount"]
+        - d["sender_balance_after"]
+    )
+    d.loc[d["sender_gap"].abs() < 1e-6, "sender_gap"] = 0.0
     d["amount_ratio"] = d["amount"] / (d["sender_balance_before"] + 1)
     d["drained"] = (d["sender_balance_after"] <= 0).astype(float)
     d["hour_sin"] = np.sin(2 * np.pi * d["hour"] / 24)
     d["hour_cos"] = np.cos(2 * np.pi * d["hour"] / 24)
-    for c in ["sender_gap", "receiver_gap"]:
-        d[c] = np.sign(d[c]) * np.log1p(d[c].abs())
-    for c in ["amount", "sender_balance_before", "sender_balance_after",
-              "receiver_balance_before", "receiver_balance_after"]:
-        d[c] = np.log1p(d[c].clip(lower=0))
+
+    weekday_number = d["day_of_week"].map({
+        "Mon": 0,
+        "Tue": 1,
+        "Wed": 2,
+        "Thu": 3,
+        "Fri": 4,
+        "Sat": 5,
+        "Sun": 6,
+    })
+    if weekday_number.isna().any():
+        raise ValueError("Missing or unsupported day_of_week value for BAE scoring")
+
+    d["weekday_sin"] = np.sin(2 * np.pi * weekday_number / 7)
+    d["weekday_cos"] = np.cos(2 * np.pi * weekday_number / 7)
+    d["sender_gap"] = np.sign(d["sender_gap"]) * np.log1p(d["sender_gap"].abs())
+
+    for column in ("amount", "sender_balance_before", "sender_balance_after"):
+        d[column] = np.log1p(d[column].clip(lower=0))
+
     return d
+
+
+def not_scored(reason: str) -> dict:
+    return {
+        "results_id": None,
+        "anomaly_score": None,
+        "risk_flag": False,
+        "scored": False,
+        "stage": "not_scored",
+        "reason": reason,
+    }
+
+
 def score_transaction_with_bae(tx_data: dict, trans_id: str = None):
     """Evaluates a two stage cascade with PCA edge screen and full BAE and saves to ai_results."""
     if bae_model is None or bae_bundle is None:
         return None
 
+    raw_amount = tx_data.get("amount_out")
+    if raw_amount is None:
+        raw_amount = tx_data.get("amount")
+    balance_after = tx_data.get("balance")
+    time_transaction = tx_data.get("created_at")
+    if raw_amount is None or balance_after is None or not time_transaction:
+        return not_scored("Amount, closing balance, and transaction timestamp are required")
+
     try:
-        raw_amount = abs(float(tx_data.get("amount_out") or tx_data.get("amount") or 0.0))
-        time_transaction = tx_data.get("created_at")
-        if not time_transaction and trans_id:
-            try:
-                db_rows = supabase_db.table("transactions").select("created_at").eq("transaction_id", trans_id).execute().data
-                if db_rows:
-                    time_transaction = db_rows[0].get("created_at")
-            except Exception:
-                pass
-        if not time_transaction:
-            time_transaction = datetime.now(timezone.utc).isoformat()
+        amount = abs(float(raw_amount))
+        sender_balance_after = float(balance_after)
+        transaction_time = datetime.fromisoformat(
+            str(time_transaction).replace("Z", "+00:00")
+        )
+    except (TypeError, ValueError) as exc:
+        return not_scored(f"Invalid transaction input: {exc}")
 
-        dt = datetime.fromisoformat(str(time_transaction).replace("Z", "+00:00"))
-        hour = dt.hour
-        day_of_week = dt.strftime("%a")
-        balance = float(tx_data.get("balance") or 0.0)
-        input_df = pd.DataFrame([{
-            'amount': raw_amount,
-            'sender_balance_before': balance + raw_amount,
-            'sender_balance_after': balance,
-            'receiver_balance_before': 0.0,
-            'receiver_balance_after': 0.0,
-            'hour': hour,
-            'transaction_type': tx_data.get("category", "peer"),
-            'device_type': 'smartphone',
-            'region': 'Nairobi',
-            'day_of_week': day_of_week
-        }])
-        cat_cols = ['transaction_type', 'device_type', 'region', 'day_of_week']
-        featured_df = add_features(input_df)
-        encoded = pd.get_dummies(featured_df, columns=cat_cols, drop_first=True, dtype=float)
-        aligned = encoded.reindex(columns=bae_bundle["feature_columns"], fill_value=0.0)
-        if pca_screener is not None:
-        
-            scaled_for_pca = bae_bundle["feature_scaler"].transform(aligned).astype(np.float32)
-            spe = np.mean(
-                (scaled_for_pca - pca_screener.inverse_transform(
-                    pca_screener.transform(scaled_for_pca))
-                ) ** 2
+    if not np.isfinite([amount, sender_balance_after]).all():
+        return not_scored("Amount and closing balance must be finite numbers")
+
+    sender_balance_before = tx_data.get("sender_balance_before")
+    if sender_balance_before is None:
+        student_id = tx_data.get("student_id")
+        if not student_id:
+            return not_scored("Student ID is required to find the previous balance")
+
+        previous_transactions = (
+            supabase_db.table("transactions")
+            .select("balance")
+            .eq("student_id", student_id)
+            .lt("created_at", str(time_transaction))
+            .order("created_at", desc=True)
+            .limit(1)
+            .execute()
+        ).data
+        if not previous_transactions or previous_transactions[0].get("balance") is None:
+            return not_scored("No earlier transaction balance is available")
+        sender_balance_before = previous_transactions[0]["balance"]
+
+    try:
+        sender_balance_before = float(sender_balance_before)
+    except (TypeError, ValueError) as exc:
+        return not_scored(f"Invalid opening balance: {exc}")
+
+    if not np.isfinite(sender_balance_before):
+        return not_scored("Opening balance must be a finite number")
+
+    if transaction_time.tzinfo is None:
+        transaction_time = transaction_time.replace(tzinfo=timezone.utc)
+    transaction_time = transaction_time.astimezone(NAIROBI)
+
+    input_df = pd.DataFrame([{
+        "amount": amount,
+        "sender_balance_before": sender_balance_before,
+        "sender_balance_after": sender_balance_after,
+        "hour": transaction_time.hour,
+        "day_of_week": transaction_time.strftime("%a"),
+    }])
+    featured_df = add_features(input_df)
+    feature_columns = list(bae_bundle["feature_columns"])
+    missing_features = set(feature_columns).difference(featured_df.columns)
+    if missing_features:
+        raise RuntimeError(
+            f"BAE bundle requires unavailable features: {sorted(missing_features)}"
+        )
+    aligned = featured_df.loc[:, feature_columns].astype(np.float32)
+
+    if pca_screener is not None:
+        expected_features = getattr(pca_screener, "n_features_in_", len(feature_columns))
+        if expected_features != len(feature_columns):
+            raise RuntimeError(
+                "PCA artifact does not match the BAE feature bundle: "
+                f"expected {expected_features} features, got {len(feature_columns)}"
             )
-            pca_z = (
-                spe - bae_bundle["stats"]["pca_median"]
-            ) / max(bae_bundle["stats"]["pca_iqr"], 1e-12)
-            if pca_z < bae_bundle["stats"]["pca_threshold"]:
-                return {
-                    "results_id": None,
-                    "anomaly_score": float(pca_z),
-                    "risk_flag": False,
-                    "stage": "pca_cleared",
-                }
+        scaled_for_pca = bae_bundle["feature_scaler"].transform(aligned).astype(np.float32)
+        spe = np.mean(
+            (scaled_for_pca - pca_screener.inverse_transform(
+                pca_screener.transform(scaled_for_pca))
+            ) ** 2
+        )
+        pca_z = (
+            spe - bae_bundle["stats"]["pca_median"]
+        ) / max(bae_bundle["stats"]["pca_iqr"], 1e-12)
+        if pca_z < bae_bundle["stats"]["pca_threshold"]:
+            return {
+                "results_id": None,
+                "anomaly_score": float(pca_z),
+                "risk_flag": False,
+                "scored": True,
+                "stage": "pca_cleared",
+            }
 
-        scaled_x = bae_bundle["feature_scaler"].transform(aligned).astype(np.float32)
+    scaled_x = bae_bundle["feature_scaler"].transform(aligned).astype(np.float32)
+    if not np.isfinite(scaled_x).all():
+        raise RuntimeError("BAE feature scaling produced non-finite values")
 
-        with torch.no_grad():
-            tensor_x = torch.tensor(scaled_x, dtype=torch.float32)
-            latent = bae_model.encoder(tensor_x).numpy()
-            reconstructed = bae_model(tensor_x).numpy()
+    with torch.no_grad():
+        tensor_x = torch.tensor(scaled_x, dtype=torch.float32)
+        latent = bae_model.encoder(tensor_x).numpy()
+        reconstructed = bae_model(tensor_x).numpy()
 
-        recon_error = float(np.mean((scaled_x - reconstructed) ** 2, axis=1)[0])
+    recon_error = float(np.mean((scaled_x - reconstructed) ** 2, axis=1)[0])
 
-        latent_scaled = bae_bundle["latent_scaler"].transform(latent)
-        _, cluster_dist = pairwise_distances_argmin_min(latent_scaled, bae_bundle["birch_centers"])
-        cluster_dist_val = float(cluster_dist[0])
+    latent_scaled = bae_bundle["latent_scaler"].transform(latent)
+    _, cluster_dist = pairwise_distances_argmin_min(
+        latent_scaled,
+        bae_bundle["birch_centers"],
+    )
+    cluster_dist_val = float(cluster_dist[0])
 
-        stats = bae_bundle["stats"]
-        recon_score = (recon_error - stats["recon_median"]) / stats["recon_iqr"]
-        cluster_score = (cluster_dist_val - stats["cluster_median"]) / stats["cluster_iqr"]
-        anomaly_score = float((recon_score + cluster_score) / 2)
+    stats = bae_bundle["stats"]
+    recon_score = (recon_error - stats["recon_median"]) / stats["recon_iqr"]
+    cluster_score = (cluster_dist_val - stats["cluster_median"]) / stats["cluster_iqr"]
+    anomaly_score = float((recon_score + cluster_score) / 2)
 
-        threshold = float(bae_bundle["threshold"])
-        is_anomaly = anomaly_score >= threshold
+    threshold = float(bae_bundle["threshold"])
+    is_anomaly = anomaly_score >= threshold
 
-        # Insert to public.ai_results table
-        result_record = {
-            "results_id": str(uuid.uuid4()),
-            "transaction_id": trans_id,
-            "track_a_score": None,
-            "track_a_forecast": None,
-            "track_b_reconstruct_err": round(recon_error, 4),
-            "track_b_forecast": None,
-            "risk_flag": is_anomaly
-        }
-        supabase_db.table("ai_results").insert(result_record).execute()
+    result_record = {
+        "results_id": str(uuid.uuid4()),
+        "transaction_id": trans_id,
+        "track_a_score": None,
+        "track_a_forecast": None,
+        "track_b_reconstruct_err": round(recon_error, 4),
+        "track_b_forecast": None,
+        "risk_flag": is_anomaly,
+    }
+    supabase_db.table("ai_results").insert(result_record).execute()
 
-        return {
-            "results_id": result_record["results_id"],
-            "anomaly_score": round(anomaly_score, 4),
-            "risk_flag": is_anomaly,
-            "stage": "bae_full"
-        }
-    except Exception as e:
-        print(f"BAE evaluation error for transaction: {str(e)}")
-        return None
+    return {
+        "results_id": result_record["results_id"],
+        "anomaly_score": round(anomaly_score, 4),
+        "risk_flag": is_anomaly,
+        "scored": True,
+        "stage": "bae_full",
+    }
 
 @app.get("/sponsor/dependants/{student_id}/budget-health")
 def dependant_budget_health(student_id: str,
