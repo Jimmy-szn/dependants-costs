@@ -659,21 +659,62 @@ def add_features(d: pd.DataFrame) -> pd.DataFrame:
     return d
 
 
-def not_scored(reason: str) -> dict:
+def persist_bae_evaluation(
+    trans_id: str,
+    stage: str,
+    scored: bool,
+    risk_flag: bool,
+    anomaly_score: float = None,
+    reconstruction_error: float = None,
+    reason: str = None,
+) -> dict:
+    result_record = {
+        "results_id": str(uuid.uuid4()),
+        "transaction_id": trans_id,
+        "track_a_score": None,
+        "track_a_forecast": None,
+        "track_b_reconstruct_err": (
+            round(reconstruction_error, 4)
+            if reconstruction_error is not None
+            else None
+        ),
+        "track_b_forecast": None,
+        "risk_flag": risk_flag,
+        "anomaly_score": (
+            round(anomaly_score, 4)
+            if anomaly_score is not None
+            else None
+        ),
+        "evaluation_stage": stage,
+        "scored": scored,
+        "evaluation_reason": reason,
+    }
+    supabase_db.table("ai_results").insert(result_record).execute()
+
     return {
-        "results_id": None,
-        "anomaly_score": None,
-        "risk_flag": False,
-        "scored": False,
-        "stage": "not_scored",
+        "results_id": result_record["results_id"],
+        "anomaly_score": result_record["anomaly_score"],
+        "risk_flag": risk_flag,
+        "scored": scored,
+        "stage": stage,
         "reason": reason,
     }
+
+
+def not_scored(reason: str, trans_id: str) -> dict:
+    return persist_bae_evaluation(
+        trans_id=trans_id,
+        stage="not_scored",
+        scored=False,
+        risk_flag=False,
+        reason=reason,
+    )
 
 
 def score_transaction_with_bae(tx_data: dict, trans_id: str = None):
     """Evaluates a two stage cascade with PCA edge screen and full BAE and saves to ai_results."""
     if bae_model is None or bae_bundle is None:
-        return None
+        return not_scored("BAE model or bundle is not loaded", trans_id)
 
     def is_positive_amount(value):
         try:
@@ -693,7 +734,8 @@ def score_transaction_with_bae(tx_data: dict, trans_id: str = None):
     time_transaction = tx_data.get("transaction_time") or tx_data.get("occurred_at")
     if raw_amount is None or balance_after is None or not time_transaction:
         return not_scored(
-            "A non-zero transaction amount, closing balance, and transaction_time are required"
+            "A non-zero transaction amount, closing balance, and transaction_time are required",
+            trans_id,
         )
 
     try:
@@ -703,26 +745,27 @@ def score_transaction_with_bae(tx_data: dict, trans_id: str = None):
             str(time_transaction).replace("Z", "+00:00")
         )
     except (TypeError, ValueError) as exc:
-        return not_scored(f"Invalid transaction input: {exc}")
+        return not_scored(f"Invalid transaction input: {exc}", trans_id)
 
     if not np.isfinite([amount, sender_balance_after]).all():
-        return not_scored("Amount and closing balance must be finite numbers")
+        return not_scored("Amount and closing balance must be finite numbers", trans_id)
     if amount <= 0:
-        return not_scored("Transaction amount must be greater than zero")
+        return not_scored("Transaction amount must be greater than zero", trans_id)
 
     sender_balance_before = tx_data.get("sender_balance_before")
     if sender_balance_before is None:
         return not_scored(
-            "Opening balance is unavailable; send sender_balance_before with the transaction"
+            "Opening balance is unavailable; send sender_balance_before with the transaction",
+            trans_id,
         )
 
     try:
         sender_balance_before = float(sender_balance_before)
     except (TypeError, ValueError) as exc:
-        return not_scored(f"Invalid opening balance: {exc}")
+        return not_scored(f"Invalid opening balance: {exc}", trans_id)
 
     if not np.isfinite(sender_balance_before):
-        return not_scored("Opening balance must be a finite number")
+        return not_scored("Opening balance must be a finite number", trans_id)
 
     if transaction_time.tzinfo is None:
         transaction_time = transaction_time.replace(tzinfo=NAIROBI)
@@ -761,13 +804,13 @@ def score_transaction_with_bae(tx_data: dict, trans_id: str = None):
             spe - bae_bundle["stats"]["pca_median"]
         ) / max(bae_bundle["stats"]["pca_iqr"], 1e-12)
         if pca_z < bae_bundle["stats"]["pca_threshold"]:
-            return {
-                "results_id": None,
-                "anomaly_score": float(pca_z),
-                "risk_flag": False,
-                "scored": True,
-                "stage": "pca_cleared",
-            }
+            return persist_bae_evaluation(
+                trans_id=trans_id,
+                stage="pca_cleared",
+                scored=True,
+                risk_flag=False,
+                anomaly_score=float(pca_z),
+            )
 
     scaled_x = bae_bundle["feature_scaler"].transform(aligned).astype(np.float32)
     if not np.isfinite(scaled_x).all():
@@ -795,24 +838,14 @@ def score_transaction_with_bae(tx_data: dict, trans_id: str = None):
     threshold = float(bae_bundle["threshold"])
     is_anomaly = anomaly_score >= threshold
 
-    result_record = {
-        "results_id": str(uuid.uuid4()),
-        "transaction_id": trans_id,
-        "track_a_score": None,
-        "track_a_forecast": None,
-        "track_b_reconstruct_err": round(recon_error, 4),
-        "track_b_forecast": None,
-        "risk_flag": is_anomaly,
-    }
-    supabase_db.table("ai_results").insert(result_record).execute()
-
-    return {
-        "results_id": result_record["results_id"],
-        "anomaly_score": round(anomaly_score, 4),
-        "risk_flag": is_anomaly,
-        "scored": True,
-        "stage": "bae_full",
-    }
+    return persist_bae_evaluation(
+        trans_id=trans_id,
+        stage="bae_full",
+        scored=True,
+        risk_flag=is_anomaly,
+        anomaly_score=anomaly_score,
+        reconstruction_error=recon_error,
+    )
 
 @app.get("/sponsor/dependants/{student_id}/budget-health")
 def dependant_budget_health(student_id: str,
