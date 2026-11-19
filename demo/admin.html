@@ -1,0 +1,374 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Dependants Costs — Admin</title>
+  <style>
+    :root {
+      color-scheme: light;
+      font: 16px/1.5 system-ui, sans-serif;
+      color: #17212b;
+      background: #f3f6f8;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+    }
+
+    header {
+      padding: 1.25rem max(1.25rem, calc((100% - 960px) / 2));
+      color: #fff;
+      background: #16314d;
+    }
+
+    header h1 {
+      margin: 0;
+      font-size: 1.25rem;
+    }
+
+    header p {
+      margin: 0.2rem 0 0;
+      color: #d7e2ec;
+      font-size: 0.9rem;
+    }
+
+    main {
+      width: min(960px, calc(100% - 2rem));
+      margin: 2rem auto;
+    }
+
+    .panel,
+    .metric {
+      border: 1px solid #dce3e9;
+      border-radius: 0.65rem;
+      background: #fff;
+      box-shadow: 0 2px 8px #16314d0a;
+    }
+
+    .panel {
+      max-width: 440px;
+      margin: 3rem auto;
+      padding: 1.5rem;
+    }
+
+    .panel h2 {
+      margin-top: 0;
+    }
+
+    .field {
+      display: grid;
+      gap: 0.35rem;
+      margin: 1rem 0;
+    }
+
+    input {
+      width: 100%;
+      padding: 0.65rem 0.75rem;
+      border: 1px solid #aebbc7;
+      border-radius: 0.35rem;
+      font: inherit;
+    }
+
+    button {
+      padding: 0.65rem 1rem;
+      border: 0;
+      border-radius: 0.35rem;
+      color: #fff;
+      background: #16314d;
+      font: inherit;
+      font-weight: 650;
+      cursor: pointer;
+    }
+
+    button:disabled {
+      cursor: wait;
+      opacity: 0.65;
+    }
+
+    button.secondary {
+      color: #16314d;
+      background: #e8eef3;
+    }
+
+    .toolbar {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 1rem;
+    }
+
+    .toolbar h2 {
+      margin: 0;
+    }
+
+    .metrics {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 1rem;
+      margin-top: 1.25rem;
+    }
+
+    .metric {
+      padding: 1.25rem;
+    }
+
+    .metric h3 {
+      margin: 0;
+      color: #536575;
+      font-size: 0.95rem;
+      font-weight: 600;
+    }
+
+    .metric p {
+      margin: 0.5rem 0 0;
+      color: #16314d;
+      font-size: 2rem;
+      font-weight: 700;
+    }
+
+    .results-panel {
+      margin-top: 1.25rem;
+      padding: 1.25rem;
+      border: 1px solid #dce3e9;
+      border-radius: 0.65rem;
+      background: #fff;
+      box-shadow: 0 2px 8px #16314d0a;
+    }
+
+    .results-panel h3 {
+      margin: 0 0 0.75rem;
+      color: #536575;
+      font-size: 0.95rem;
+    }
+
+    .results-panel pre {
+      max-height: 28rem;
+      margin: 0;
+      overflow: auto;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+      font: 0.85rem/1.5 ui-monospace, monospace;
+    }
+
+    .note {
+      color: #536575;
+      font-size: 0.9rem;
+    }
+
+    .message {
+      min-height: 1.5rem;
+      margin: 0.75rem 0 0;
+    }
+
+    .message.error {
+      color: #a32626;
+    }
+
+    .message.success {
+      color: #17683a;
+    }
+
+    [hidden] {
+      display: none !important;
+    }
+
+    @media (max-width: 560px) {
+      .metrics {
+        grid-template-columns: 1fr;
+      }
+
+      .toolbar {
+        align-items: flex-start;
+      }
+    }
+  </style>
+</head>
+
+<body>
+  <header>
+    <h1>Dependants Costs</h1>
+    <p>Restricted operations dashboard · aggregate metrics only</p>
+  </header>
+
+  <main>
+    <section id="login-panel" class="panel" aria-labelledby="login-title">
+      <h2 id="login-title">Admin sign in</h2>
+      <p class="note">Sign in with an authorized Supabase account.</p>
+      <form id="login-form">
+        <label class="field">
+          Email
+          <input id="email" name="email" type="email" autocomplete="username" required>
+        </label>
+        <label class="field">
+          Password
+          <input id="password" name="password" type="password" autocomplete="current-password" required>
+        </label>
+        <button id="sign-in" type="submit">Sign in</button>
+      </form>
+      <p id="login-message" class="message" role="status" aria-live="polite"></p>
+    </section>
+
+    <section id="dashboard" hidden aria-labelledby="dashboard-title">
+      <div class="toolbar">
+        <h2 id="dashboard-title">Operations overview</h2>
+        <button id="sign-out" class="secondary" type="button">Sign out</button>
+      </div>
+      <p class="note">All-time totals. No student-level transaction details are shown.</p>
+      <p id="dashboard-message" class="message" role="status" aria-live="polite"></p>
+      <div class="metrics">
+        <article class="metric">
+          <h3>Total transactions</h3>
+          <p id="transactions-total">—</p>
+        </article>
+        <article class="metric">
+          <h3>Flagged AI results</h3>
+          <p id="flagged-total">—</p>
+        </article>
+      </div>
+      <section class="results-panel" aria-labelledby="all-results-title">
+        <h3 id="all-results-title">AI results</h3>
+        <pre id="all-results">—</pre>
+      </section>
+    </section>
+  </main>
+
+  <script>
+    const loginPanel = document.getElementById("login-panel");
+    const dashboard = document.getElementById("dashboard");
+    const loginForm = document.getElementById("login-form");
+    const loginMessage = document.getElementById("login-message");
+    const dashboardMessage = document.getElementById("dashboard-message");
+    const signInButton = document.getElementById("sign-in");
+    const numberFormat = new Intl.NumberFormat();
+
+    function showMessage(element, message, kind = "") {
+      element.textContent = message;
+      element.className = `message ${kind}`;
+    }
+
+    function showError(error) {
+      return error instanceof Error ? error.message : "An unexpected error occurred.";
+    }
+
+    function showDashboard() {
+      loginPanel.hidden = true;
+      dashboard.hidden = false;
+    }
+
+    function showLogin() {
+      dashboard.hidden = true;
+      loginPanel.hidden = false;
+    }
+
+    function clearMetrics() {
+      document.getElementById("transactions-total").textContent = "—";
+      document.getElementById("flagged-total").textContent = "—";
+      document.getElementById("all-results").textContent = "—";
+    }
+
+    async function loadOverview() {
+      clearMetrics();
+      showMessage(dashboardMessage, "Loading dashboard…");
+
+      const response = await fetch("/admin/overview");
+      const result = await response.json();
+
+      if (!response.ok) {
+        if (response.status === 401) {
+          showLogin();
+          return false;
+        }
+        throw new Error(result.detail || `Dashboard request failed (${response.status}).`);
+      }
+
+      if (!result.overview ||
+        !Number.isFinite(result.overview.transactions_total) ||
+        !Number.isFinite(result.overview.flagged_ai_results_total) ||
+        !Array.isArray(result.ai_results)) {
+        throw new Error("The dashboard response did not contain the expected metrics.");
+      }
+
+      document.getElementById("transactions-total").textContent =
+        numberFormat.format(result.overview.transactions_total);
+      document.getElementById("flagged-total").textContent =
+        numberFormat.format(result.overview.flagged_ai_results_total);
+      document.getElementById("all-results").textContent = JSON.stringify(result.ai_results, null, 2);
+      showMessage(dashboardMessage, "Dashboard data loaded.", "success");
+
+      showDashboard();
+      return true;
+    }
+
+    loginForm.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      signInButton.disabled = true;
+      showMessage(loginMessage, "Signing in…");
+
+      try {
+        const response = await fetch("/admin/login", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            email: document.getElementById("email").value,
+            password: document.getElementById("password").value
+          })
+        });
+        const result = await response.json();
+        if (!response.ok) {
+          throw new Error(result.detail || `Sign in failed (${response.status}).`);
+        }
+
+        try {
+          await loadOverview();
+        } catch (error) {
+          showDashboard();
+          showMessage(dashboardMessage, showError(error), "error");
+        }
+      } catch (error) {
+        showLogin();
+        showMessage(loginMessage, showError(error), "error");
+      } finally {
+        signInButton.disabled = false;
+      }
+    });
+
+    document.getElementById("sign-out").addEventListener("click", async () => {
+      try {
+        const response = await fetch("/admin/logout", { method: "POST" });
+        if (!response.ok) throw new Error(`Sign out failed (${response.status}).`);
+        loginForm.reset();
+        clearMetrics();
+        showLogin();
+        showMessage(loginMessage, "You have signed out.", "success");
+      } catch (error) {
+        showMessage(dashboardMessage, showError(error), "error");
+      }
+    });
+
+    async function restoreSession() {
+      try {
+        try {
+          const authenticated = await loadOverview();
+          if (!authenticated) {
+            showMessage(loginMessage, "Sign in with an authorized Supabase account.");
+          }
+        } catch (error) {
+          showDashboard();
+          showMessage(dashboardMessage, showError(error), "error");
+        }
+      } catch (error) {
+        showMessage(loginMessage, showError(error), "error");
+      }
+    }
+
+    void restoreSession();
+  </script>
+</body>
+
+</html>
