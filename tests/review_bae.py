@@ -64,9 +64,12 @@ def build_features(transactions: pd.DataFrame) -> pd.DataFrame:
         raise ValueError(f"Dataset is missing required columns: {sorted(missing)}")
 
     features = transactions.copy()
+    if "transaction_fee" not in features:
+        features["transaction_fee"] = 0.0
     features["sender_gap"] = (
         features["sender_balance_before"]
         - features["amount"]
+        - features["transaction_fee"]
         - features["sender_balance_after"]
     )
     features.loc[features["sender_gap"].abs() < 1e-6, "sender_gap"] = 0.0
