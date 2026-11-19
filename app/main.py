@@ -486,7 +486,12 @@ def endpoint(body: Request) -> Response:
 async def sync_transaction(request: SyncRequest, student_id: str = Depends(require_student)):
     if not request.transactionData:
         return {"status": "ok", "message": "synced_count: 0", "anomalies_flagged": 0, "evaluations": [], "data": []}
-    inference_fields = {"transaction_time", "occurred_at", "sender_balance_before"}
+    inference_fields = {
+        "transaction_time",
+        "occurred_at",
+        "sender_balance_before",
+        "transaction_fee",
+    }
     inference_metadata = {}
     for transaction in request.transactionData:
         transaction["student_id"] = student_id
@@ -626,9 +631,12 @@ async def predict_budget(request: ForecastRequest,
         ) 
 def add_features(d: pd.DataFrame) -> pd.DataFrame:
     d = d.copy()
+    if "transaction_fee" not in d:
+        d["transaction_fee"] = 0.0
     d["sender_gap"] = (
         d["sender_balance_before"]
         - d["amount"]
+        - d["transaction_fee"]
         - d["sender_balance_after"]
     )
     d.loc[d["sender_gap"].abs() < 1e-6, "sender_gap"] = 0.0
@@ -716,30 +724,19 @@ def score_transaction_with_bae(tx_data: dict, trans_id: str = None):
     if bae_model is None or bae_bundle is None:
         return not_scored("BAE model or bundle is not loaded", trans_id)
 
-    def is_positive_amount(value):
-        try:
-            return value is not None and float(value) > 0
-        except (TypeError, ValueError):
-            return False
-
     amount_out = tx_data.get("amount_out")
     amount_in = tx_data.get("amount_in")
-    if is_positive_amount(amount_out):
-        raw_amount = amount_out
-    elif is_positive_amount(amount_in):
-        raw_amount = amount_in
-    else:
-        raw_amount = tx_data.get("amount")
     balance_after = tx_data.get("balance")
     time_transaction = tx_data.get("transaction_time") or tx_data.get("occurred_at")
-    if raw_amount is None or balance_after is None or not time_transaction:
+    if amount_out is None or balance_after is None or not time_transaction:
         return not_scored(
-            "A non-zero transaction amount, closing balance, and transaction_time are required",
+            "An outgoing amount, closing balance, and transaction_time are required",
             trans_id,
         )
 
     try:
-        amount = abs(float(raw_amount))
+        amount = float(amount_out)
+        amount_in = float(tx_data.get("amount_in") or 0)
         sender_balance_after = float(balance_after)
         transaction_time = datetime.fromisoformat(
             str(time_transaction).replace("Z", "+00:00")
@@ -747,10 +744,37 @@ def score_transaction_with_bae(tx_data: dict, trans_id: str = None):
     except (TypeError, ValueError) as exc:
         return not_scored(f"Invalid transaction input: {exc}", trans_id)
 
-    if not np.isfinite([amount, sender_balance_after]).all():
-        return not_scored("Amount and closing balance must be finite numbers", trans_id)
+    if not np.isfinite([amount, amount_in, sender_balance_after]).all():
+        return not_scored(
+            "Amounts and closing balance must be finite numbers",
+            trans_id,
+        )
+    if amount_in < 0:
+        return not_scored("Incoming amount must not be negative", trans_id)
     if amount <= 0:
-        return not_scored("Transaction amount must be greater than zero", trans_id)
+        if amount_in > 0:
+            return not_scored(
+                "This BAE model was trained on outgoing transactions; incoming transactions are not scored",
+                trans_id,
+            )
+        return not_scored("Outgoing transaction amount must be greater than zero", trans_id)
+    if amount_in > 0:
+        return not_scored(
+            "Transaction has both incoming and outgoing amounts; direction is ambiguous",
+            trans_id,
+        )
+
+    if "transaction_fee" not in tx_data or tx_data["transaction_fee"] is None:
+        return not_scored(
+            "transaction_fee is required; send 0 when the transaction has no fee",
+            trans_id,
+        )
+    try:
+        transaction_fee = float(tx_data["transaction_fee"])
+    except (TypeError, ValueError) as exc:
+        return not_scored(f"Invalid transaction fee: {exc}", trans_id)
+    if not np.isfinite(transaction_fee) or transaction_fee < 0:
+        return not_scored("Transaction fee must be a finite non-negative number", trans_id)
 
     sender_balance_before = tx_data.get("sender_balance_before")
     if sender_balance_before is None:
@@ -764,8 +788,21 @@ def score_transaction_with_bae(tx_data: dict, trans_id: str = None):
     except (TypeError, ValueError) as exc:
         return not_scored(f"Invalid opening balance: {exc}", trans_id)
 
-    if not np.isfinite(sender_balance_before):
-        return not_scored("Opening balance must be a finite number", trans_id)
+    if not np.isfinite(sender_balance_before) or sender_balance_before < 0:
+        return not_scored(
+            "Opening balance must be a finite non-negative number",
+            trans_id,
+        )
+    if sender_balance_after < 0:
+        return not_scored(
+            "Closing balance must be a non-negative number",
+            trans_id,
+        )
+    if sender_balance_after > sender_balance_before:
+        return not_scored(
+            "Outgoing transaction increased the balance; verify direction and balance inputs",
+            trans_id,
+        )
 
     if transaction_time.tzinfo is None:
         transaction_time = transaction_time.replace(tzinfo=NAIROBI)
@@ -773,6 +810,7 @@ def score_transaction_with_bae(tx_data: dict, trans_id: str = None):
 
     input_df = pd.DataFrame([{
         "amount": amount,
+        "transaction_fee": transaction_fee,
         "sender_balance_before": sender_balance_before,
         "sender_balance_after": sender_balance_after,
         "hour": transaction_time.hour,
@@ -780,6 +818,22 @@ def score_transaction_with_bae(tx_data: dict, trans_id: str = None):
     }])
     featured_df = add_features(input_df)
     feature_columns = list(bae_bundle["feature_columns"])
+    expected_feature_columns = [
+        "amount",
+        "sender_balance_before",
+        "sender_balance_after",
+        "amount_ratio",
+        "drained",
+        "sender_gap",
+        "hour_sin",
+        "hour_cos",
+        "weekday_sin",
+        "weekday_cos",
+    ]
+    if feature_columns != expected_feature_columns:
+        raise RuntimeError(
+            "BAE bundle feature order does not match the deployed inference contract"
+        )
     missing_features = set(feature_columns).difference(featured_df.columns)
     if missing_features:
         raise RuntimeError(
