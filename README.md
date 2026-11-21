@@ -64,6 +64,8 @@ docker build -t dependant-costs . && docker run -p 8000:8000 dependant-costs
 | `GET`  | `/fetch-monthly-transactions` | Fetches active month transactions | Supabase Auth Protected |
 | `GET`  | `/health` | Cloud health check endpoint | Core System |
 
+For BAE scoring via `/sync-transaction`, outgoing transactions must include `amount_out`, `balance` (closing balance), `sender_balance_before`, the original `transaction_time`, and `transaction_fee` (use `0` when there is no fee). Incoming transactions are stored but not scored by this outgoing-only model. `transaction_time`, `sender_balance_before`, and `transaction_fee` are inference inputs and are not stored in `transactions`.
+
 ---
 
 ## Benchmark & Evaluation Summary
@@ -73,13 +75,13 @@ Evaluated on **19,847 held-out test transactions** (months 11–12, 575 verified
 
 | Architecture / Method | Precision | Recall | F1 Score | Alerts / True Positives | Test PR-AUC | Operational Characteristic |
 | :--- | :---: | :---: | :---: | :---: | :---: | :--- |
-| **Multivariate PCA** *(95% var, 18 comp.)* | **0.9870** | 0.6609 | **0.7917** | 385 / 380 | **0.7003** | Lowest false alarms (only 5 on ~20k rows); best on linear balance deviations. |
-| **Birch Autoencoder (BAE)** *(Latent=4, BIRCH th=3.0)* | 0.9294 | **0.6643** | 0.7748 | 411 / **382** | 0.6998 | Highest raw true positive catch; captures non-linear cluster anomalies. |
+| **Multivariate PCA** *(90% var, 18 comp.)* | **0.9845** | 0.6626 | 0.7921 | 387 / 381 | 0.7019 | Lowest false alarms (6 on ~20k rows); best on linear balance deviations. |
+| **Birch Autoencoder (BAE)** *(Notebook/Colab run; Latent=4, BIRCH th=3.0)* | 0.9698 | **0.6713** | **0.7934** | 398 / **386** | **0.7035** | Captures non-linear cluster anomalies. |
 | *Reconstruction-Only Autoencoder (Ablation)* | 0.8841 | 0.6120 | 0.7233 | 398 / 352 | 0.6492 | Removing BIRCH latent distance reduces PR-AUC by 0.051. |
 | *Supervised Classifier (Diagnostic baseline)* | — | — | — | — | 0.6970 | HistGradientBoosting (balanced class weights). |
 | *Deterministic Rule (`amount > sender_balance`)* | 1.0000 | 0.6122 | 0.7594 | 352 / 352 | — | Catches clear overdraws; misses all hidden velocity/temporal drift. |
 
-> **Key takeaway:** Bootstrap 95% confidence interval for the PR-AUC difference ($\text{BAE} - \text{PCA}$) is **[$-0.006, +0.005$]** (spanning zero), demonstrating statistical parity between the two models. Combining latent BIRCH clustering with Autoencoder reconstruction increased PR-AUC from **0.6492 to 0.6998**.
+> **Key takeaway:** Bootstrap 95% confidence interval for the PR-AUC difference ($\text{BAE} - \text{PCA}$) is **[$-0.004, +0.008$]** (spanning zero), demonstrating no statistically clear PR-AUC difference between the two models.
 
 ---
 
