@@ -45,7 +45,8 @@ docker build -t dependant-costs . && docker run -p 8000:8000 dependant-costs
 | `GET`  | `/admin` | Admin dashboard | Core System |
 | `POST`  | `/admin/login` | Admin login page | Core System |
 | `POST`  | `/admin/logout` | Admin logout page | Core System |
-| `GET`  | `/admin/overview` | Admin overview page | Core System |
+| `GET`  | `/admin/overview` | Admin overview page | Core System ||
+
 For BAE scoring via `/sync-transaction`, outgoing transactions must include `amount_out`, `balance` (closing balance), `sender_balance_before`, the original `transaction_time`, and `transaction_fee` (use `0` when there is no fee). Incoming transactions are stored but not scored by this outgoing-only model. `transaction_time`, `sender_balance_before`, and `transaction_fee` are inference inputs and are not stored in `transactions`.
 
 ---
